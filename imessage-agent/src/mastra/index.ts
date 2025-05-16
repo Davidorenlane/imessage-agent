@@ -1,12 +1,10 @@
 import { Mastra } from "@mastra/core/mastra";
 import { createLogger } from "@mastra/core/logger";
 import { LibSQLStore } from "@mastra/libsql";
-import { weatherWorkflow } from "./workflows";
-import { weatherAgent, iMessageAgent } from "./agents";
+import { iMessageAgent } from "./agents/imessageAgent";
 
 export const mastra = new Mastra({
-  workflows: { weatherWorkflow },
-  agents: { weatherAgent, iMessageAgent },
+  agents: { iMessageAgent },
   storage: new LibSQLStore({
     // stores telemetry, evals, ... into memory storage, if it needs to persist, change to file:../mastra.db
     url: ":memory:",
