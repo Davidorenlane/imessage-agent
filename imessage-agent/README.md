@@ -11,6 +11,8 @@ To use the iMessage Agent, you'll need to have access to the following files:
 1. **chat.db**: This is your iMessage database file, located at `~/Library/Messages/chat.db` on your Mac.
 2. **contacts.vcf**: This is your contacts file which can be exported from the macOS Contacts app.
 
+Both of these files will need to be placed in the `.mastra/output/data/user_data` directory after starting the development server.
+
 ### Installation
 
 1. Clone this repository:
@@ -26,22 +28,32 @@ To use the iMessage Agent, you'll need to have access to the following files:
    npm install
    ```
 
-3. Set up your data files:
+3. Start the development server:
 
    ```
-   mkdir -p data/user_data
+   npm run dev
    ```
 
-4. Copy your files (with read-only access for safety):
+4. Set up your data directory:
+
+   ```
+   mkdir -p .mastra/output/data/user_data
+   ```
+
+   > Note: The `.mastra/output` directory is generated during the build process and is where the runtime expects to find your data files.
+
+5. Copy your files:
 
    ```
    # Copy your chat database (may require administrative access)
-   cp -R ~/Library/Messages/chat.db data/user_data/
+   cp -R ~/Library/Messages/chat.db .mastra/output/data/user_data/
 
    # Export contacts.vcf from the macOS Contacts app and place it in data directory
    # Contacts app > File > Export > Export vCard...
-   # Then move the file to data/user_data/contacts.vcf
+   # Then move the file to .mastra/output/data/user_data/contacts.vcf
    ```
+
+   > **Important**: Do not place the files directly in the project's `data/user_data` directory. They must be in the `.mastra/output/data/user_data` directory to be accessible to the running application.
 
 ## Usage
 
@@ -78,7 +90,7 @@ The iMessage Agent provides several tools to work with your messages and contact
 
 ## Security & Privacy
 
-Your data remains local, as the agent processes everything on your machine. The chat.db and contacts.vcf files are never uploaded to any server.
+This version sends your data to OpenAI, but my goal is to eventually move to a self-hosted solution, which seems pretty doable with Mastra! Sort of relies on how good the small open source models get!
 
 ## Development
 
@@ -95,6 +107,10 @@ Your data remains local, as the agent processes everything on your machine. The 
 - The agent retrieves up to 3 conversations at a time to prevent excessive data loading
 - Messages with null content are excluded from results
 
+# LOL Claude went off the rails a little starting here :)
+
+Have not tried any of this yet -->
+
 ## Troubleshooting
 
 ### Comprehensive Troubleshooting Tool
@@ -107,7 +123,7 @@ node tools/troubleshoot.js
 
 This tool will:
 
-- Check your data directory setup
+- Check your data directory setup in `.mastra/output/data/user_data`
 - Validate your VCF file format and content
 - Test the SQLite database connection
 - Provide specific recommendations to fix any issues
@@ -119,7 +135,7 @@ If you're experiencing problems with contacts not loading, follow these steps:
 1. **Run the VCF validator tool:**
 
    ```
-   node tools/vcf-validator.js
+   node tools/vcf-validator.js .mastra/output/data/user_data/contacts.vcf
    ```
 
    This will check your contacts.vcf file and identify common issues.
@@ -137,7 +153,7 @@ If you're experiencing problems with contacts not loading, follow these steps:
    - Open Contacts app
    - Select the contacts you want to export
    - Go to File > Export > Export vCard...
-   - Save the file to `data/user_data/contacts.vcf`
+   - Save the file to `.mastra/output/data/user_data/contacts.vcf`
 
 4. **Enable debug mode:**
    You can enable detailed logging by setting the `debug` option to true when creating the DataLoader:
@@ -150,10 +166,10 @@ If you're experiencing problems with contacts not loading, follow these steps:
 If you're having trouble with the chat.db file:
 
 1. **Check file permissions:**
-   The chat.db file should be readable by your application. You may need to adjust permissions or copy it to the data directory with proper access rights.
+   The chat.db file should be readable by your application. You may need to adjust permissions or copy it to the correct data directory with proper access rights.
 
 2. **Database busy or locked errors:**
    This can happen if Messages app is using the database. Close Messages or make a copy of the database file instead of using the original.
 
 3. **File not found errors:**
-   Make sure the file path is correct. The default location is `data/user_data/chat.db`.
+   Make sure the file path is correct. The required location is `.mastra/output/data/user_data/chat.db`.
