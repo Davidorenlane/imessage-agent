@@ -13,7 +13,7 @@ To use the iMessage Agent, you'll need to have access to the following files:
 
 Both of these files will need to be placed in the `.mastra/output/data/user_data` directory after starting the development server.
 
-### Installation
+### Installation - Sorry if this guide isn't perfect, this is my best attempt at documenting how I got it working for myself!
 
 1. Clone this repository:
 
@@ -57,6 +57,8 @@ Both of these files will need to be placed in the `.mastra/output/data/user_data
 
 ## Usage
 
+> **Important**: Before you start you'll need to add an OPEN_AI_API_KEY to your .env file. Typical queries cost a few cents in OpenAI credits, but there are really no guardrails and it could get quite expensive! Please USE AT YOUR OWN RISK. Alternatively, you can try with another model or model provider. This has been a fun way to benchmark a few different models with openRouter!
+
 The iMessage Agent provides several tools to work with your messages and contacts:
 
 1. **Find Contact**: Locate contacts by name, phone number, or email. Supports fuzzy matching and reconciliation between VCF contacts and chat.db handles.
@@ -79,7 +81,7 @@ The iMessage Agent provides several tools to work with your messages and contact
 
 3. **Count Messages**: Count messages or contacts across various criteria.
 
-## Core Features
+## Core Features, as described by Claude 😮‍💨
 
 - Phone number and email normalization for consistent contact identification
 - Reconciliation between contact names and phone numbers
