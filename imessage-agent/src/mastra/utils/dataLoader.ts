@@ -28,11 +28,11 @@ function appleTimestampToISO(appleTimestamp: number): string {
       return new Date().toISOString(); // Fallback to current date
     }
 
-    const APPLE_EPOCH_OFFSET_SECONDS = 978307200; // Seconds between Unix epoch (1970-01-01) and Apple epoch (2001-01-01)
+    const APPLE_EPOCH_OFFSET_MILLISECONDS = 978307200 * 1000; // Seconds between Unix epoch (1970-01-01) and Apple epoch (2001-01-01)
 
     // Calculate the Unix timestamp in milliseconds
     const unixTimestampMilliseconds =
-      (appleTimestamp + APPLE_EPOCH_OFFSET_SECONDS) * 1000;
+      Math.floor(appleTimestamp / 1000000) + APPLE_EPOCH_OFFSET_MILLISECONDS;
 
     // Check if the timestamp is within range for JavaScript Date
     // JavaScript Date can handle dates from -8,640,000,000,000 to 8,640,000,000,000 milliseconds
@@ -321,15 +321,17 @@ export class DataLoader {
   }
 
   /**
-   * Gets chat data for a specific contact.
+   * Gets chat data for a specific contact, including conversation participants.
    *
    * @param contactId Normalized contact ID
-   * @param limit Maximum number of messages to retrieve
-   * @returns Messages for the contact
+   * @param conversationLimit Maximum number of conversations to retrieve
+   * @param messageLimit Maximum number of messages per conversation to retrieve
+   * @returns Messages for the contact grouped by conversation with participant info
    */
   public async getChatDataForContact(
     contactId: string,
-    limit: number = 50
+    conversationLimit: number = 3,
+    messageLimit: number = 20
   ): Promise<any[]> {
     if (!fs.existsSync(this.chatDbPath)) {
       console.error(`Chat database file not found: ${this.chatDbPath}`);
@@ -368,56 +370,170 @@ export class DataLoader {
         return [];
       }
 
-      // Get messages for this handle
-      const messages = await db.all(
+      // First get the conversations (chats) involving this handle
+      const conversations = await db.all(
         `
-        SELECT 
-          message.ROWID, 
-          message.text, 
-          message.date, 
-          message.is_from_me,
-          handle.id as handle_id
-        FROM message 
-        JOIN handle ON message.handle_id = handle.ROWID
+        SELECT DISTINCT chat.ROWID as chat_id
+        FROM chat
+        JOIN chat_message_join ON chat.ROWID = chat_message_join.chat_id
+        JOIN message ON chat_message_join.message_id = message.ROWID
         WHERE message.handle_id = ?
         ORDER BY message.date DESC
         LIMIT ?
       `,
-        [handle.ROWID, limit]
+        [handle.ROWID, conversationLimit]
       );
 
-      // Convert Apple timestamps to ISO format
-      const formattedMessages = messages.map((msg) => {
-        try {
-          // Create a safe copy of the message with appropriate conversions
-          return {
-            ...msg,
-            date: msg.date
-              ? appleTimestampToISO(msg.date)
-              : new Date().toISOString(),
-            is_from_me: Boolean(msg.is_from_me),
-            // Ensure text is always a string or null
-            text: msg.text != null ? String(msg.text) : null,
-          };
-        } catch (convErr) {
-          // If something goes wrong with an individual message, log and return a simplified version
-          console.error(`Error processing message ${msg.ROWID}:`, convErr);
-          return {
-            ROWID: msg.ROWID || 0,
-            text:
-              msg.text != null
-                ? String(msg.text)
-                : "Error retrieving message content",
-            date: new Date().toISOString(),
-            is_from_me: Boolean(msg.is_from_me),
-            handle_id: normalizedValue,
-          };
-        }
-      });
+      this.debugLog(
+        `Found ${conversations.length} conversations for contact ${contactId}`
+      );
+
+      // Explicitly type allMessages to fix linter error
+      let allMessages: Array<{
+        ROWID: number;
+        text: string | null;
+        date: string;
+        is_from_me: boolean;
+        has_attachments?: boolean;
+        handle_id?: string;
+        chat_id?: number;
+        conversation_id: string;
+        conversation_participants: Array<{ id: string; rowid: number }>;
+      }> = [];
+
+      // For each conversation, get the messages and participants
+      for (const conv of conversations) {
+        // Get all participants for this conversation
+        const participants = await db.all(
+          `
+          SELECT DISTINCT handle.id as handle_id, handle.ROWID as handle_rowid
+          FROM chat_handle_join
+          JOIN handle ON chat_handle_join.handle_id = handle.ROWID
+          WHERE chat_handle_join.chat_id = ?
+        `,
+          [conv.chat_id]
+        );
+
+        this.debugLog(
+          `Found ${participants.length} participants in conversation ${conv.chat_id}`
+        );
+
+        // Get messages for this conversation
+        const chatMessages = await db.all(
+          `
+          SELECT 
+            message.ROWID, 
+            message.text, 
+            message.date,
+            message.is_from_me,
+            message.cache_has_attachments,
+            handle.id as handle_id,
+            chat.ROWID as chat_id
+          FROM message 
+          JOIN chat_message_join ON message.ROWID = chat_message_join.message_id
+          JOIN chat ON chat_message_join.chat_id = chat.ROWID
+          LEFT JOIN handle ON message.handle_id = handle.ROWID
+          WHERE chat.ROWID = ?
+          ORDER BY message.date DESC
+          LIMIT ?
+        `,
+          [conv.chat_id, messageLimit]
+        );
+
+        // Add participant information to each message
+        const formattedMessages = chatMessages.map((msg) => {
+          try {
+            // Get participant name
+            let participantId = msg.handle_id || "unknown";
+
+            // Create safe copy of the message with conversions
+            // Log timestamp information for debugging
+            if (this.debug) {
+              console.log(
+                `Raw message date value: ${msg.date}, type: ${typeof msg.date}`
+              );
+            }
+
+            // Ensure timestamp conversion is properly handled
+            let isoDate;
+            if (msg.date) {
+              if (typeof msg.date === "number") {
+                // This is likely an Apple timestamp (seconds since 2001)
+                isoDate = appleTimestampToISO(msg.date);
+                if (this.debug) {
+                  console.log(
+                    `Converted Apple timestamp ${msg.date} to ISO ${isoDate}`
+                  );
+                }
+              } else if (typeof msg.date === "string") {
+                // Handle the case where it might already be an ISO string
+                try {
+                  // Check if it's a valid date string
+                  const testDate = new Date(appleTimestampToISO(msg.date));
+                  if (!isNaN(testDate.getTime())) {
+                    isoDate = appleTimestampToISO(msg.date);
+                  } else {
+                    isoDate = new Date().toISOString();
+                    console.warn(
+                      `Invalid date string from database: ${msg.date}`
+                    );
+                  }
+                } catch (dateErr) {
+                  isoDate = new Date().toISOString();
+                  console.warn(
+                    `Error parsing date string: ${msg.date}`,
+                    dateErr
+                  );
+                }
+              } else {
+                // Fallback if the date is an unexpected type
+                isoDate = new Date().toISOString();
+                console.warn(`Unexpected date type: ${typeof msg.date}`);
+              }
+            } else {
+              // No date provided
+              isoDate = new Date().toISOString();
+              console.warn(`No date provided for message ${msg.ROWID}`);
+            }
+
+            return {
+              ...msg,
+              date: isoDate,
+              is_from_me: Boolean(msg.is_from_me),
+              has_attachments: Boolean(msg.cache_has_attachments),
+              text: msg.text != null ? String(msg.text) : null,
+              conversation_id: `chat_${msg.chat_id}`,
+              // Add the list of all participants in this conversation
+              conversation_participants: participants.map((p) => ({
+                id: p.handle_id,
+                rowid: p.handle_rowid,
+              })),
+            };
+          } catch (convErr) {
+            console.error(`Error processing message ${msg.ROWID}:`, convErr);
+            return {
+              ROWID: msg.ROWID || 0,
+              text:
+                msg.text != null
+                  ? String(msg.text)
+                  : "Error retrieving message",
+              date: new Date().toISOString(),
+              is_from_me: Boolean(msg.is_from_me),
+              handle_id: msg.handle_id || normalizedValue,
+              conversation_id: `chat_${msg.chat_id}`,
+              conversation_participants: participants.map((p) => ({
+                id: p.handle_id,
+                rowid: p.handle_rowid,
+              })),
+            };
+          }
+        });
+
+        allMessages = [...allMessages, ...formattedMessages];
+      }
 
       await db.close();
-
-      return formattedMessages;
+      return allMessages;
     } catch (err) {
       console.error(`Error retrieving messages for ${contactId}:`, err);
       this.debugLog("SQLite error details:", err);
@@ -425,23 +541,55 @@ export class DataLoader {
       // Fallback to mock data if there's an error
       console.warn("Falling back to mock message data");
 
-      // Simulated implementation as fallback
-      const mockMessages = Array(Math.min(limit, 10))
-        .fill(0)
-        .map((_, i) => {
-          const date = new Date();
-          date.setMinutes(date.getMinutes() - i * 10); // Messages 10 minutes apart
+      // Create a more realistic mock conversation structure
+      const mockConversations = [];
 
-          return {
-            ROWID: 1000 + i,
-            text: `Simulated message ${i + 1} with ${normalizedValue}`,
-            date: date.toISOString(),
-            is_from_me: i % 2 === 0,
-            handle_id: normalizedValue,
-          };
-        });
+      // Generate up to 3 mock conversations
+      for (let convId = 0; convId < Math.min(3, conversationLimit); convId++) {
+        const mockParticipants = [
+          { id: normalizedValue, rowid: 1000 + convId },
+          { id: "user@icloud.com", rowid: 2000 + convId },
+        ];
 
-      return mockMessages;
+        // Add a random third participant to some conversations
+        if (convId % 2 === 0) {
+          mockParticipants.push({
+            id: `+1555123${convId}456`,
+            rowid: 3000 + convId,
+          });
+        }
+
+        // Generate messages for this conversation
+        const messagesForConversation = Array(
+          Math.min(messageLimit, 5 + convId * 2)
+        )
+          .fill(0)
+          .map((_, i) => {
+            // Create dates that go back in time, not just hours but days
+            // This makes the mock data more realistic with a wider range of dates
+            const date = new Date();
+            date.setDate(date.getDate() - convId * 7 - Math.floor(i / 3)); // Go back in time by days
+            date.setHours(date.getHours() - (i % 3)); // Add some hour variation
+
+            // Alternate between sent and received
+            const isFromMe = i % 2 === 0;
+            const participantIndex = isFromMe ? 1 : 0;
+
+            return {
+              ROWID: 1000 + convId * 100 + i,
+              text: `${isFromMe ? "You sent" : "They sent"}: Message ${i + 1} in conversation ${convId + 1}`,
+              date: date.toISOString(), // Use realistic historical dates
+              is_from_me: isFromMe,
+              handle_id: mockParticipants[participantIndex].id,
+              conversation_id: `mock_conversation_${convId}`,
+              conversation_participants: mockParticipants,
+            };
+          });
+
+        mockConversations.push(...messagesForConversation);
+      }
+
+      return mockConversations;
     }
   }
 

@@ -19,29 +19,6 @@ const dataLoader = new DataLoader(contactStore);
 // Ensure data directory exists
 dataLoader.ensureDataDirectoryExists();
 
-/**
- * Converts Apple CoreData timestamp (seconds since 2001-01-01) to ISO 8601 string.
- * @param appleTimestamp Seconds since 2001-01-01 00:00:00 UTC.
- * @returns ISO 8601 date string.
- */
-function appleTimestampToISO(appleTimestamp: number): string {
-  const APPLE_EPOCH_OFFSET_SECONDS = 978307200; // Seconds between Unix epoch (1970-01-01) and Apple epoch (2001-01-01)
-  const unixTimestampMilliseconds =
-    (appleTimestamp + APPLE_EPOCH_OFFSET_SECONDS) * 1000;
-  return new Date(unixTimestampMilliseconds).toISOString();
-}
-
-/**
- * Converts ISO 8601 string to Apple CoreData timestamp.
- * @param isoDateString ISO 8601 date string.
- * @returns Apple CoreData timestamp (seconds since 2001-01-01).
- */
-function isoToAppleTimestamp(isoDateString: string): number {
-  const APPLE_EPOCH_OFFSET_SECONDS = 978307200;
-  const unixTimestampSeconds = new Date(isoDateString).getTime() / 1000;
-  return unixTimestampSeconds - APPLE_EPOCH_OFFSET_SECONDS;
-}
-
 // --- Tool 1: Find Contact ---
 const FindContactInputSchema = z.object({
   query: z
@@ -206,42 +183,59 @@ const GetConversationsInputSchema = z.object({
     .describe(
       "End date for messages (ISO 8601 format, e.g., YYYY-MM-DDTHH:MM:SSZ). Filters messages on or before this date."
     ),
-  limit: z
+  conversationLimit: z
     .number()
     .int()
     .positive()
     .optional()
-    .default(50)
-    .describe("Maximum number of messages to return."),
+    .default(3)
+    .describe("Maximum number of conversations to retrieve."),
+  messageLimit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .default(20)
+    .describe("Maximum number of messages to retrieve per conversation."),
+  timeGapMinutes: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .default(30)
+    .describe(
+      "Time gap in minutes to consider messages as part of a new conversation."
+    ),
+});
+
+// Participant schema for conversation
+const ParticipantSchema = z.object({
+  id: z.string().describe("The normalized contact ID for the participant."),
+  name: z.string().describe("Display name of the participant."),
+});
+
+// Original message schema (to be nested in conversation)
+const MessageSchema = z.object({
+  from: z.string().describe("Name of the sender"),
+  at: z.string().describe("Readable timestamp of the message"),
+  text: z.string().describe("Content of the message."),
+});
+
+// New conversation schema that contains messages (without start/end dates)
+const ConversationSchema = z.object({
+  conversationId: z
+    .string()
+    .describe("Unique identifier for the conversation."),
+  participants: z
+    .array(ParticipantSchema)
+    .describe("Participants in the conversation."),
+  messages: z.array(MessageSchema).describe("Messages in this conversation."),
 });
 
 const GetConversationsOutputSchema = z.object({
-  messages: z
-    .array(
-      z.object({
-        messageId: z.number().int().describe("ID of the message from chat.db."),
-        text: z.string().nullable().describe("Content of the message."),
-        date: z
-          .string()
-          .datetime()
-          .describe("Timestamp of the message in ISO 8601 format."),
-        isFromMe: z
-          .boolean()
-          .describe(
-            "True if the message was sent by the user, false otherwise."
-          ),
-        contactId: z
-          .string()
-          .describe(
-            "The normalized contact ID this message is associated with."
-          ),
-        contactName: z
-          .string()
-          .optional()
-          .describe("Display name associated with the contact."),
-      })
-    )
-    .describe("List of messages matching the criteria."),
+  conversations: z
+    .array(ConversationSchema)
+    .describe("List of conversations matching the criteria."),
   details: z
     .string()
     .optional()
@@ -253,15 +247,22 @@ type GetConversationsOutputType = z.infer<typeof GetConversationsOutputSchema>;
 export const getConversationsTool = createTool({
   id: "imessage-get-conversations",
   description:
-    "Retrieves iMessage conversations for a specific contact, within a date range, or both.",
+    "Retrieves up to 3 iMessage conversations for a specific contact, with a configurable number of messages per conversation. Provides message history with all participants in each conversation.",
   inputSchema: GetConversationsInputSchema,
   outputSchema: GetConversationsOutputSchema,
   execute: async ({ context }) => {
-    const { contactId, startDate, endDate, limit } = context;
+    const {
+      contactId,
+      startDate,
+      endDate,
+      conversationLimit = 3,
+      messageLimit = 20,
+      timeGapMinutes = 30,
+    } = context;
 
     if (!contactId) {
       return {
-        messages: [],
+        conversations: [],
         details: "A contactId is required.",
       } as GetConversationsOutputType;
     }
@@ -269,14 +270,14 @@ export const getConversationsTool = createTool({
     // Validate date formats if provided
     if (startDate && isNaN(new Date(startDate).getTime())) {
       return {
-        messages: [],
+        conversations: [],
         details: `Invalid startDate format. Please use ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ).`,
       } as GetConversationsOutputType;
     }
 
     if (endDate && isNaN(new Date(endDate).getTime())) {
       return {
-        messages: [],
+        conversations: [],
         details: `Invalid endDate format. Please use ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ).`,
       } as GetConversationsOutputType;
     }
@@ -289,20 +290,26 @@ export const getConversationsTool = createTool({
     } catch (err) {
       console.error("Error loading data:", err);
       return {
-        messages: [],
+        conversations: [],
         details: `There was an error loading contact data. Please ensure the data files are available.`,
       } as GetConversationsOutputType;
     }
 
-    // Get the contact to resolve the name
+    // Get the primary contact to resolve the name
     const contact = contactStore.findContact(contactId);
     const contactName = contact?.displayName || "Unknown";
 
     // Get messages
     try {
-      console.log(`Retrieving messages for contact: ${contactId}`);
-      const messages = await dataLoader.getChatDataForContact(contactId, limit);
-      console.log(`Successfully retrieved ${messages.length} messages`);
+      console.log(`Retrieving conversations for contact: ${contactId}`);
+      const messages = await dataLoader.getChatDataForContact(
+        contactId,
+        conversationLimit,
+        messageLimit
+      );
+      console.log(
+        `Successfully retrieved ${messages.length} messages from up to ${conversationLimit} conversations`
+      );
 
       // Filter by date if needed
       let filteredMessages = messages;
@@ -329,7 +336,7 @@ export const getConversationsTool = createTool({
         });
       }
 
-      // Format messages for output
+      // Format messages for output, removing null messages
       const formattedMessages = filteredMessages
         .map((msg) => {
           // Safety check for required fields
@@ -338,25 +345,163 @@ export const getConversationsTool = createTool({
             return null;
           }
 
+          // Skip messages with null text
+          if (msg.text == null) {
+            return null;
+          }
+
+          // Determine sender
+          const senderContactId = msg.is_from_me
+            ? "me"
+            : msg.handle_id
+              ? createContactId(msg.handle_id)
+              : contactId;
+          let senderName = msg.is_from_me ? "You" : contactName;
+
+          // Try to look up other participants
+          if (!msg.is_from_me && msg.handle_id) {
+            const senderContact = contactStore.findContact(msg.handle_id);
+            if (senderContact) {
+              senderName = senderContact.displayName;
+            }
+          }
+
           return {
-            messageId: msg.ROWID || 0,
-            text: msg.text,
-            date: msg.date,
-            isFromMe: !!msg.is_from_me,
-            contactId: contactId,
-            contactName,
+            id: msg.ROWID || 0, // Keep for sorting, but will be removed from output
+            from: senderName,
+            at: msg.date,
+            text: String(msg.text), // Convert to string and ensure not nullsation ID from the data loader
+            conversationId: msg.conversation_id || `fallback_${Date.now()}`,
+            // Include participant information
+            participantInfo: msg.conversation_participants || [],
           };
         })
         .filter(Boolean); // Remove any null entries
 
+      // Group messages by conversation ID
+      const conversationMap = new Map<
+        string,
+        {
+          conversationId: string;
+          participants: Array<{ id: string; name: string }>;
+          messages: Array<any>;
+        }
+      >();
+
+      // First pass: Group messages by conversation ID and collect participants
+      for (const msg of formattedMessages) {
+        if (msg && msg.conversationId) {
+          if (!conversationMap.has(msg.conversationId)) {
+            // Start with the primary contact and "me"
+            const initialParticipants = [
+              {
+                id: contactId,
+                name: contactName,
+              },
+              {
+                id: "me",
+                name: "You",
+              },
+            ];
+
+            // Add other participants if available
+            if (msg.participantInfo && Array.isArray(msg.participantInfo)) {
+              // Create a set to track unique participants
+              const participantIds = new Set(
+                initialParticipants.map((p) => p.id)
+              );
+
+              for (const participant of msg.participantInfo) {
+                if (participant.id && !participantIds.has(participant.id)) {
+                  const normalizedId = createContactId(participant.id);
+                  const participantContact = contactStore.findContact(
+                    participant.id
+                  );
+                  const participantName =
+                    participantContact?.displayName || "Unknown Contact";
+
+                  initialParticipants.push({
+                    id: normalizedId,
+                    name: participantName,
+                  });
+
+                  participantIds.add(normalizedId);
+                }
+              }
+            }
+
+            conversationMap.set(msg.conversationId, {
+              conversationId: msg.conversationId,
+              participants: initialParticipants,
+              messages: [],
+            });
+          }
+
+          const conversation = conversationMap.get(msg.conversationId);
+          if (conversation) {
+            // Add the message without metadata fields
+            const { participantInfo, conversationId, ...messageForOutput } =
+              msg;
+            conversation.messages.push(messageForOutput);
+          }
+        }
+      }
+
+      // Second pass: Sort messages and prepare final output
+      const conversations = Array.from(conversationMap.values()).map(
+        (conversation) => {
+          // Sort messages by ID in ascending order (oldest message IDs first)
+          conversation.messages.sort((a: any, b: any) => a.id - b.id);
+
+          // Pull the message IDs before we remove them for sorting conversations
+          const messageIds = conversation.messages.map((msg) => msg.id || 0);
+          const highestMessageId =
+            messageIds.length > 0 ? Math.max(...messageIds) : 0;
+
+          // Format each message with a readable timestamp
+          const formattedMessages = conversation.messages.map((msg) => {
+            // Format the date to be more readable
+            const date = new Date(msg.at);
+            const formattedDate = formatDateForDisplay(date);
+
+            // Return the message object with formatted date
+            return {
+              from: msg.from,
+              at: formattedDate,
+              text: msg.text,
+            };
+          });
+
+          // Create the final conversation object (without start/end dates)
+          return {
+            conversationId: conversation.conversationId,
+            participants: conversation.participants,
+            messages: formattedMessages,
+            _highestMessageId: highestMessageId, // Temporary field for sorting
+          };
+        }
+      );
+
+      // Sort conversations by highest message ID
+      conversations.sort((a: any, b: any) => {
+        return a._highestMessageId - b._highestMessageId; // Ascending order
+      });
+
+      // Remove the temporary _highestMessageId field
+      conversations.forEach((conv) => {
+        delete (conv as any)._highestMessageId;
+      });
+
       return {
-        messages: formattedMessages,
-        details: `Retrieved ${formattedMessages.length} messages${startDate ? ` from ${startDate}` : ""}${endDate ? ` to ${endDate}` : ""} for ${contactName}.`,
+        conversations,
+        details: `Retrieved ${formattedMessages.length} messages in ${conversations.length} conversations${
+          startDate ? ` from ${startDate}` : ""
+        }${endDate ? ` to ${endDate}` : ""} for ${contactName}. Showing up to ${conversationLimit} conversations with up to ${messageLimit} messages each.`,
       } as GetConversationsOutputType;
     } catch (err) {
       console.error("Error retrieving messages:", err);
       return {
-        messages: [],
+        conversations: [],
         details: `Error retrieving messages: ${err instanceof Error ? err.message : String(err)}`,
       } as GetConversationsOutputType;
     }
@@ -541,3 +686,56 @@ export const iMessageTools = {
   getConversationsTool,
   countTool,
 };
+
+/**
+ * Format a date for display in message output.
+ * Example: "April 18th, 2025 2:48 AM"
+ */
+function formatDateForDisplay(date: Date): string {
+  // Check if the date is valid
+  if (isNaN(date.getTime())) {
+    return "Unknown date";
+  }
+
+  try {
+    // Format the month
+    const months = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+    const month = months[date.getMonth()];
+
+    // Format the day with ordinal suffix
+    const day = date.getDate();
+    let suffix = "th";
+    if (day === 1 || day === 21 || day === 31) suffix = "st";
+    else if (day === 2 || day === 22) suffix = "nd";
+    else if (day === 3 || day === 23) suffix = "rd";
+
+    // Format the year
+    const year = date.getFullYear();
+
+    // Format the time in 12-hour format
+    let hours = date.getHours();
+    const minutes = date.getMinutes().toString().padStart(2, "0");
+    const ampm = hours >= 12 ? "PM" : "AM";
+    hours = hours % 12;
+    hours = hours ? hours : 12; // Convert 0 to 12 for 12 AM
+
+    // Put it all together
+    return `${month} ${day}${suffix}, ${year} ${hours}:${minutes} ${ampm}`;
+  } catch (error) {
+    console.error("Error formatting date:", error);
+    return "Date formatting error";
+  }
+}

@@ -49,7 +49,21 @@ The iMessage Agent provides several tools to work with your messages and contact
 
 1. **Find Contact**: Locate contacts by name, phone number, or email. Supports fuzzy matching and reconciliation between VCF contacts and chat.db handles.
 
-2. **Get Conversations**: Retrieve messages for a specific contact. Can filter by date range.
+2. **Get Conversations**: Retrieve conversations for a specific contact.
+
+   - Retrieves up to 3 most recent conversations involving the contact by default
+   - Each conversation includes all participants (not just the primary contact)
+   - Messages are grouped by actual conversation threads from the database
+   - Includes the following for each conversation:
+     - Unique conversation ID
+     - Complete list of participants with names
+     - Messages in descending order by message ID (newest first)
+   - Messages are returned as objects with:
+     - `from`: Name of the sender
+     - `at`: Readable timestamp (like "April 18th, 2025 2:48 PM")
+     - `text`: Message content
+   - Configurable number of messages per conversation (default: 20)
+   - Can filter by date range
 
 3. **Count Messages**: Count messages or contacts across various criteria.
 
@@ -59,6 +73,8 @@ The iMessage Agent provides several tools to work with your messages and contact
 - Reconciliation between contact names and phone numbers
 - VCF parsing and SQLite database connections
 - In-memory contact store that merges information from both sources
+- Multi-participant conversation support with proper threading
+- Human-readable message formatting with nicely formatted timestamps
 
 ## Security & Privacy
 
@@ -74,8 +90,10 @@ Your data remains local, as the agent processes everything on your machine. The 
 ## Limitations
 
 - The agent works with SQLite and VCF parsing, so it's designed for Mac users with iMessage
-- Group chats may not be fully supported in the current version
+- Group chats are supported but may have limitations in correctly identifying all participants
 - Date filters are based on message timestamps and may not include all attachment data
+- The agent retrieves up to 3 conversations at a time to prevent excessive data loading
+- Messages with null content are excluded from results
 
 ## Troubleshooting
 
